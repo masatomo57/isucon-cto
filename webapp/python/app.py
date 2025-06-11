@@ -131,57 +131,36 @@ def get_session_user():
 
 def make_posts(results, all_comments=False):
     posts = []
-    post_ids = [post["id"] for post in results]
-    if not post_ids:
-        return posts
-
     cursor = db().cursor()
-
-    # 投稿IDごとのコメント数をまとめて取得
-    format_strings = ','.join(['%s'] * len(post_ids))
-    cursor.execute(
-        f"SELECT post_id, COUNT(*) AS count FROM comments WHERE post_id IN ({format_strings}) GROUP BY post_id",
-        tuple(post_ids),
-    )
-    comment_counts = {row["post_id"]: row["count"] for row in cursor}
-
-    # 投稿IDごとのコメントをまとめて取得（ユーザー情報もJOIN）
-    cursor.execute(
-        f"""
-        SELECT comments.*, users.account_name AS comment_user_account_name, users.del_flg AS comment_user_del_flg
-        FROM comments
-        JOIN users ON comments.user_id = users.id
-        WHERE comments.post_id IN ({format_strings})
-        ORDER BY comments.created_at DESC
-        """,
-        tuple(post_ids),
-    )
-    comments_by_post = {}
-    for row in cursor:
-        comment = dict(row)
-        comment["user"] = {
-            "id": comment["user_id"],
-            "account_name": comment["comment_user_account_name"],
-            "del_flg": comment["comment_user_del_flg"],
-        }
-        comments_by_post.setdefault(comment["post_id"], []).append(comment)
-
-    # 投稿ごとにユーザー情報をJOINで取得済みのものを使う
     for post in results:
-        post["comment_count"] = comment_counts.get(post["id"], 0)
-        comments = comments_by_post.get(post["id"], [])
+        cursor.execute(
+            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
+            (post["id"],),
+        )
+        post["comment_count"] = cursor.fetchone()["count"]
+
+        query = (
+            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
+        )
         if not all_comments:
-            comments = comments[:3]
+            query += " LIMIT 3"
+
+        cursor.execute(query, (post["id"],))
+        comments = list(cursor)
+        for comment in comments:
+            cursor.execute(
+                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
+            )
+            comment["user"] = cursor.fetchone()
         comments.reverse()
         post["comments"] = comments
-        # 投稿者ユーザー情報をJOINで取得済み
-        post["user"] = {
-            "id": post["user_id"],
-            "account_name": post["account_name"],
-            "del_flg": post["del_flg"],
-        }
+
+        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
+        post["user"] = cursor.fetchone()
+
         if not post["user"]["del_flg"]:
             posts.append(post)
+
         if len(posts) >= POSTS_PER_PAGE:
             break
     return posts
@@ -303,52 +282,53 @@ def get_logout():
 @app.route("/")
 def get_index():
     me = get_session_user()
+
     cursor = db().cursor()
     cursor.execute(
-        """
-        SELECT posts.id, posts.user_id, posts.body, posts.created_at, posts.mime, users.account_name, users.del_flg
-        FROM posts
-        JOIN users ON posts.user_id = users.id
-        WHERE users.del_flg = 0
-        ORDER BY posts.created_at DESC
-        LIMIT 20
-        """
+        "SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC"
     )
     posts = make_posts(cursor.fetchall())
+
     return flask.render_template("index.html", posts=posts, me=me)
 
 
 @app.route("/@<account_name>")
 def get_user_list(account_name):
     cursor = db().cursor()
+
     cursor.execute(
         "SELECT * FROM `users` WHERE `account_name` = %s AND `del_flg` = 0",
         (account_name,),
     )
     user = cursor.fetchone()
     if user is None:
-        flask.abort(404)
+        flask.abort(404)  # raises exception
+
     cursor.execute(
-        "SELECT posts.id, posts.user_id, posts.body, posts.mime, posts.created_at, users.account_name, users.del_flg FROM posts JOIN users ON posts.user_id = users.id WHERE posts.user_id = %s ORDER BY posts.created_at DESC",
+        "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = %s ORDER BY `created_at` DESC",
         (user["id"],),
     )
     posts = make_posts(cursor.fetchall())
+
     cursor.execute(
         "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = %s", (user["id"],)
     )
     comment_count = cursor.fetchone()["count"]
+
     cursor.execute("SELECT `id` FROM `posts` WHERE `user_id` = %s", (user["id"],))
     post_ids = [p["id"] for p in cursor]
     post_count = len(post_ids)
+
     commented_count = 0
     if post_count > 0:
-        format_strings = ','.join(['%s'] * len(post_ids))
         cursor.execute(
-            f"SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ({format_strings})",
-            tuple(post_ids),
+            "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN %s",
+            (post_ids,),
         )
         commented_count = cursor.fetchone()["count"]
+
     me = get_session_user()
+
     return flask.render_template(
         "user.html",
         posts=posts,
