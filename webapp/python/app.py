@@ -129,42 +129,40 @@ def get_session_user():
     return None
 
 
-def make_posts(results=None, all_comments=False):
+def make_posts(results, all_comments=False):
     posts = []
     cursor = db().cursor()
-    
-    cursor.execute("""
-        SELECT 
-            p.id, p.user_id, p.body, p.created_at, p.mime,
-            u.account_name, u.del_flg, u.authority, u.created_at AS user_created_at,
-            COUNT(c.id) as comment_count
-        FROM posts p
-        JOIN users u ON p.user_id = u.id
-        LEFT JOIN comments c ON p.id = c.post_id
-        WHERE u.del_flg = 0
-        GROUP BY p.id
-        ORDER BY p.created_at DESC
-        LIMIT %s
-    """, (POSTS_PER_PAGE,))
-    
-    posts = cursor.fetchall()
-    
-    for post in posts:
-        query = """
-            SELECT c.*, u.account_name, u.del_flg, u.authority, u.created_at AS user_created_at
-            FROM comments c
-            JOIN users u ON c.user_id = u.id
-            WHERE c.post_id = %s
-            ORDER BY c.created_at DESC
-        """
+    for post in results:
+        cursor.execute(
+            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
+            (post["id"],),
+        )
+        post["comment_count"] = cursor.fetchone()["count"]
+
+        query = (
+            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
+        )
         if not all_comments:
             query += " LIMIT 3"
-        
+
         cursor.execute(query, (post["id"],))
         comments = list(cursor)
+        for comment in comments:
+            cursor.execute(
+                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
+            )
+            comment["user"] = cursor.fetchone()
         comments.reverse()
         post["comments"] = comments
-        
+
+        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
+        post["user"] = cursor.fetchone()
+
+        if not post["user"]["del_flg"]:
+            posts.append(post)
+
+        if len(posts) >= POSTS_PER_PAGE:
+            break
     return posts
 
 
@@ -287,16 +285,7 @@ def get_index():
 
     cursor = db().cursor()
     cursor.execute(
-        """
-        SELECT 
-            posts.id, posts.user_id, posts.body, posts.created_at, posts.mime,
-            users.id AS user_id, users.account_name, users.del_flg, users.authority, users.created_at AS user_created_at
-        FROM posts
-        JOIN users ON posts.user_id = users.id
-        ORDER BY posts.created_at DESC
-        LIMIT %s
-        """,
-        (POSTS_PER_PAGE,)
+        "SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC"
     )
     posts = make_posts(cursor.fetchall())
 
