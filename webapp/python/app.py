@@ -438,7 +438,12 @@ def get_posts():
 def get_posts_id(id):
     cursor = db().cursor()
 
-    cursor.execute("SELECT * FROM `posts` WHERE `id` = %s", (id,))
+    cursor.execute("""
+        SELECT p.* 
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.id = %s AND u.del_flg = 0
+    """, (id,))
     posts = make_posts(cursor.fetchall(), all_comments=True)
     if not posts:
         flask.abort(404)
