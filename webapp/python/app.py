@@ -130,39 +130,69 @@ def get_session_user():
 
 
 def make_posts(results, all_comments=False):
-    posts = []
+    if not results:
+        return []
+
+    # 必要なIDを収集
+    post_ids = [p["id"] for p in results]
+    user_ids_from_posts = {p["user_id"] for p in results}
+
     cursor = db().cursor()
-    for post in results:
-        cursor.execute(
-            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
-            (post["id"],),
-        )
-        post["comment_count"] = cursor.fetchone()["count"]
+    
+    # 1. コメントを一括取得
+    post_id_placeholders = ",".join(["%s"] * len(post_ids))
+    
+    # Python側でLIMIT 3を再現するため、一度関連コメントをすべて取得
+    comment_query = f"""
+        SELECT * FROM `comments` WHERE `post_id` IN ({post_id_placeholders}) ORDER BY `created_at` DESC
+    """
+    cursor.execute(comment_query, tuple(post_ids))
+    all_related_comments = list(cursor.fetchall())
+    
+    # コメントからユーザーIDを収集
+    user_ids_from_comments = {c["user_id"] for c in all_related_comments}
+    
+    # 2. ユーザー情報を一括取得
+    all_user_ids = list(user_ids_from_posts | user_ids_from_comments)
+    users_by_id = {}
+    if all_user_ids:
+        user_id_placeholders = ",".join(["%s"] * len(all_user_ids))
+        user_query = f"SELECT * FROM `users` WHERE `id` IN ({user_id_placeholders})"
+        cursor.execute(user_query, tuple(all_user_ids))
+        for u in cursor.fetchall():
+            users_by_id[u["id"]] = u
 
-        query = (
-            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
-        )
-        if not all_comments:
-            query += " LIMIT 3"
+    # 3. 投稿ごとのコメントとコメント数を組み立てる
+    comments_by_post_id = {}
+    comment_counts = {}
+    for post_id in post_ids:
+        comments_by_post_id[post_id] = []
+        comment_counts[post_id] = 0
 
-        cursor.execute(query, (post["id"],))
-        comments = list(cursor)
-        for comment in comments:
-            cursor.execute(
-                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
-            )
-            comment["user"] = cursor.fetchone()
-        comments.reverse()
-        post["comments"] = comments
+    for comment in all_related_comments:
+        post_id = comment["post_id"]
+        comment_counts[post_id] += 1
+        # all_comments=False の場合は3件まで格納
+        if all_comments or len(comments_by_post_id[post_id]) < 3:
+            comment["user"] = users_by_id.get(comment["user_id"])
+            comments_by_post_id[post_id].append(comment)
 
-        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
-        post["user"] = cursor.fetchone()
+    # 4. 最終的な投稿リストを生成
+    posts = []
+    for p in results:
+        p["user"] = users_by_id.get(p["user_id"])
+        
+        # コメントを時系列順に戻す
+        post_comments = comments_by_post_id.get(p["id"], [])
+        post_comments.reverse()
+        
+        p["comments"] = post_comments
+        p["comment_count"] = comment_counts.get(p["id"], 0)
+        
+        # get_index以外から呼ばれた場合も想定し、del_flgチェックを残す
+        if p["user"] and not p["user"]["del_flg"]:
+            posts.append(p)
 
-        if not post["user"]["del_flg"]:
-            posts.append(post)
-
-        if len(posts) >= POSTS_PER_PAGE:
-            break
     return posts
 
 
@@ -282,12 +312,21 @@ def get_logout():
 @app.route("/")
 def get_index():
     me = get_session_user()
-
     cursor = db().cursor()
-    cursor.execute(
-        "SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC"
-    )
-    posts = make_posts(cursor.fetchall())
+
+    # 変更後のクエリ
+    query = """
+        SELECT p.id, p.user_id, p.body, p.created_at, p.mime
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE u.del_flg = 0
+        ORDER BY p.created_at DESC
+        LIMIT %s
+    """
+    cursor.execute(query, (POSTS_PER_PAGE,))
+    results = cursor.fetchall()
+
+    posts = make_posts(results) # 改善後の make_posts を呼び出す
 
     return flask.render_template("index.html", posts=posts, me=me)
 
