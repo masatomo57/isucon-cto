@@ -15,6 +15,7 @@ from pymemcache.client.base import Client as MemcacheClient
 
 UPLOAD_LIMIT = 10 * 1024 * 1024  # 10mb
 POSTS_PER_PAGE = 20
+IMG_DIR = pathlib.Path(__file__).resolve().parent.parent / "public" / "img"
 
 
 _config = None
@@ -188,7 +189,7 @@ def image_url(post):
     elif mime == "image/gif":
         ext = ".gif"
 
-    return "/image/%s%s" % (post["id"], ext)
+    return "/img/%s%s" % (post["id"], ext)
 
 
 # http://flask.pocoo.org/snippets/28/
@@ -416,6 +417,20 @@ def post_index():
     cursor = db().cursor()
     cursor.execute(query, (me["id"], mime, imgdata, flask.request.form.get("body")))
     pid = cursor.lastrowid
+
+    # Save image to filesystem
+    ext = ""
+    if mime == "image/jpeg":
+        ext = ".jpg"
+    elif mime == "image/png":
+        ext = ".png"
+    elif mime == "image/gif":
+        ext = ".gif"
+
+    img_path = IMG_DIR / f"{pid}{ext}"
+    with open(img_path, "wb") as f:
+        f.write(imgdata)
+
     return flask.redirect("/posts/%d" % pid)
 
 
@@ -427,9 +442,28 @@ def get_image(id, ext):
     if id == 0:
         return ""
 
+    # Check if image exists in filesystem
+    img_path = IMG_DIR / f"{id}.{ext}"
+    if img_path.exists():
+        mime = None
+        if ext == "jpg":
+            mime = "image/jpeg"
+        elif ext == "png":
+            mime = "image/png"
+        elif ext == "gif":
+            mime = "image/gif"
+        
+        if mime:
+            with open(img_path, "rb") as f:
+                return flask.Response(f.read(), mimetype=mime)
+
+    # Fallback to database
     cursor = db().cursor()
     cursor.execute("SELECT * FROM `posts` WHERE `id` = %s", (id,))
     post = cursor.fetchone()
+
+    if not post:
+        flask.abort(404)
 
     mime = post["mime"]
     if (
@@ -440,6 +474,10 @@ def get_image(id, ext):
         or ext == "gif"
         and mime == "image/gif"
     ):
+        # Save to filesystem for future requests
+        img_path = IMG_DIR / f"{id}.{ext}"
+        with open(img_path, "wb") as f:
+            f.write(post["imgdata"])
         return flask.Response(post["imgdata"], mimetype=mime)
 
     flask.abort(404)
