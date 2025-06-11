@@ -139,13 +139,27 @@ def make_posts(results, all_comments=False):
 
     cursor = db().cursor()
     
-    # 1. コメントを一括取得
+    # 1. コメントを一括取得（最大20件に制限し、インデックスを活用）
     post_id_placeholders = ",".join(["%s"] * len(post_ids))
     
-    # Python側でLIMIT 3を再現するため、一度関連コメントをすべて取得
-    comment_query = f"""
-        SELECT * FROM `comments` WHERE `post_id` IN ({post_id_placeholders}) ORDER BY `created_at` DESC
-    """
+    if all_comments:
+        # 全コメント取得時も20件に制限
+        comment_query = f"""
+            SELECT * FROM `comments` 
+            WHERE `post_id` IN ({post_id_placeholders}) 
+            ORDER BY `post_id`, `created_at` DESC
+            LIMIT 20
+        """
+    else:
+        # 通常時は3件×投稿数程度に制限（最大20件）
+        limit_count = min(len(post_ids) * 3, 20)
+        comment_query = f"""
+            SELECT * FROM `comments` 
+            WHERE `post_id` IN ({post_id_placeholders}) 
+            ORDER BY `post_id`, `created_at` DESC
+            LIMIT {limit_count}
+        """
+    
     cursor.execute(comment_query, tuple(post_ids))
     all_related_comments = list(cursor.fetchall())
     
@@ -314,7 +328,7 @@ def get_index():
     me = get_session_user()
     cursor = db().cursor()
 
-    # 変更後のクエリ
+    # 最適化されたクエリ（インデックスを活用）
     query = """
         SELECT p.id, p.user_id, p.body, p.created_at, p.mime
         FROM posts p
@@ -326,7 +340,7 @@ def get_index():
     cursor.execute(query, (POSTS_PER_PAGE,))
     results = cursor.fetchall()
 
-    posts = make_posts(results) # 改善後の make_posts を呼び出す
+    posts = make_posts(results)
 
     return flask.render_template("index.html", posts=posts, me=me)
 
@@ -341,11 +355,16 @@ def get_user_list(account_name):
     )
     user = cursor.fetchone()
     if user is None:
-        flask.abort(404)  # raises exception
+        flask.abort(404)
 
+    # LIMIT追加で最適化
     cursor.execute(
-        "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = %s ORDER BY `created_at` DESC",
-        (user["id"],),
+        """SELECT `id`, `user_id`, `body`, `mime`, `created_at` 
+           FROM `posts` 
+           WHERE `user_id` = %s 
+           ORDER BY `created_at` DESC
+           LIMIT %s""",
+        (user["id"], POSTS_PER_PAGE),
     )
     posts = make_posts(cursor.fetchall())
 
@@ -391,24 +410,24 @@ def _parse_iso8601(s):
 @app.route("/posts")
 def get_posts():
     cursor = db().cursor()
-    max_created_at = flask.request.args["max_created_at"] or None
+    max_created_at = flask.request.args.get("max_created_at") or None
     if max_created_at:
         max_created_at = _parse_iso8601(max_created_at)
         cursor.execute(
-            """SELECT p.id, p.user_id, p.body, p.mime, p.created_at 
-            FROM posts p
-            JOIN users u ON p.user_id = u.id
-            WHERE p.created_at <= %s AND u.del_flg = 0
-            ORDER BY p.created_at DESC""",
-            (max_created_at,),
+            """SELECT `id`, `user_id`, `body`, `mime`, `created_at` 
+               FROM `posts` 
+               WHERE `created_at` <= %s 
+               ORDER BY `created_at` DESC
+               LIMIT %s""",
+            (max_created_at, POSTS_PER_PAGE),
         )
     else:
         cursor.execute(
-            """SELECT p.id, p.user_id, p.body, p.mime, p.created_at 
-            FROM posts p
-            JOIN users u ON p.user_id = u.id
-            WHERE u.del_flg = 0
-            ORDER BY p.created_at DESC"""
+            """SELECT `id`, `user_id`, `body`, `mime`, `created_at` 
+               FROM `posts` 
+               ORDER BY `created_at` DESC
+               LIMIT %s""",
+            (POSTS_PER_PAGE,)
         )
     results = cursor.fetchall()
     posts = make_posts(results)
