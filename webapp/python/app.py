@@ -395,12 +395,20 @@ def get_posts():
     if max_created_at:
         max_created_at = _parse_iso8601(max_created_at)
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= %s ORDER BY `created_at` DESC",
+            """SELECT p.id, p.user_id, p.body, p.mime, p.created_at 
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.created_at <= %s AND u.del_flg = 0
+            ORDER BY p.created_at DESC""",
             (max_created_at,),
         )
     else:
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE ORDER BY `created_at` DESC"
+            """SELECT p.id, p.user_id, p.body, p.mime, p.created_at 
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE u.del_flg = 0
+            ORDER BY p.created_at DESC"""
         )
     results = cursor.fetchall()
     posts = make_posts(results)
@@ -411,7 +419,12 @@ def get_posts():
 def get_posts_id(id):
     cursor = db().cursor()
 
-    cursor.execute("SELECT * FROM `posts` WHERE `id` = %s", (id,))
+    cursor.execute("""
+        SELECT p.* 
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE p.id = %s AND u.del_flg = 0
+    """, (id,))
     posts = make_posts(cursor.fetchall(), all_comments=True)
     if not posts:
         flask.abort(404)
